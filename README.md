@@ -1,4 +1,4 @@
-# Rollover Todos [Gagans]
+# Rollover Todos (Gagans)
 
 Carry unfinished todos, pins, routine streaks, pagination, and today's edited-note links between daily notes.
 

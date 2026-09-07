@@ -438,7 +438,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     const syncResult = await this.waitForSyncReady();
     if (!syncResult.ready && syncResult.reason === "timeout") {
       new Notice(
-        "Rollover Todos [Gagans]: Sync did not finish in time; skipped auto rollover. Run manually if needed."
+        "Rollover Todos (Gagans): Sync did not finish in time; skipped auto rollover. Run manually if needed."
       );
       return;
     }
@@ -1722,7 +1722,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Rollover Todos [Gagans]" });
+    containerEl.createEl("h2", { text: "Rollover Todos (Gagans)" });
     containerEl.createEl("h3", { text: "Todo管理" });
     new Setting(containerEl).setName("Run rollover").setDesc("Copy unfinished tasks and pins from the previous daily note into the latest one. Skips if already rolled over (unless the mark is stale). Also refreshes routine streaks and pagination.").addButton((button) => {
       button.setButtonText("Run").setCta().onClick(async () => {

@@ -1,9 +1,9 @@
 {
 	"id": "gagans-rollover-todos",
-	"name": "Rollover Todos [Gagans]",
-	"version": "1.0.0",
+	"name": "Rollover Todos (Gagans)",
+	"version": "1.0.1",
 	"minAppVersion": "1.5.0",
-	"description": "Roll over unfinished todos and pinned links, paginate adjacent daily notes, track {id} routine streaks, and collect today's edited note links.",
+	"description": "Roll over unfinished todos and pinned links, paginate adjacent daily notes, track routine streaks by id, and collect today's edited note links.",
 	"author": "Gagans",
 	"authorUrl": "https://github.com/LaCall-Gagans-Studio",
 	"isDesktopOnly": false
