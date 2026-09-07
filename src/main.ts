@@ -63,6 +63,26 @@ interface StoredPluginData extends Partial<GagansRolloverTodosSettings> {
 	rolledOverPairs?: Record<string, number>;
 }
 
+interface TaskContext {
+	indent: number;
+	includeSubtree: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isValidMoment(value: unknown): value is moment.Moment {
+	if (!value || typeof value !== "object" || !("isValid" in value)) {
+		return false;
+	}
+	const isValid = Reflect.get(value, "isValid");
+	if (typeof isValid !== "function") {
+		return false;
+	}
+	return Boolean(isValid.call(value));
+}
+
 interface SyncInstance {
 	pause?: boolean;
 	syncing?: boolean;
@@ -211,23 +231,39 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.pruneMissingRolloverPairs();
   }
   parseStoredData(raw: unknown): StoredPluginData {
-    if (!raw || typeof raw !== "object") {
+    if (!isRecord(raw)) {
       return {};
     }
-    const record = raw as Record<string, unknown>;
     const data: StoredPluginData = {};
-    for (const [key, value] of Object.entries(record)) {
-      if (key === "rolledOverPairs" && value && typeof value === "object" && !Array.isArray(value)) {
-        const pairs: Record<string, number> = {};
-        for (const [pairKey, pairValue] of Object.entries(value as Record<string, unknown>)) {
-          if (typeof pairValue === "number") {
-            pairs[pairKey] = pairValue;
-          }
+    if (typeof raw.targetHeading === "string") data.targetHeading = raw.targetHeading;
+    if (typeof raw.routineHeading === "string") data.routineHeading = raw.routineHeading;
+    if (typeof raw.dailyNoteFormat === "string") data.dailyNoteFormat = raw.dailyNoteFormat;
+    if (typeof raw.tagDateFormat === "string") data.tagDateFormat = raw.tagDateFormat;
+    if (typeof raw.dailyNotesFolder === "string") data.dailyNotesFolder = raw.dailyNotesFolder;
+    if (typeof raw.createDelayMs === "number") data.createDelayMs = raw.createDelayMs;
+    if (typeof raw.waitForSync === "boolean") data.waitForSync = raw.waitForSync;
+    if (typeof raw.syncWaitTimeoutMs === "number") data.syncWaitTimeoutMs = raw.syncWaitTimeoutMs;
+    if (typeof raw.syncSettleMs === "number") data.syncSettleMs = raw.syncSettleMs;
+    if (typeof raw.editedEnabled === "boolean") data.editedEnabled = raw.editedEnabled;
+    if (typeof raw.editedHeading === "string") data.editedHeading = raw.editedHeading;
+    if (typeof raw.editedDebounceMs === "number") data.editedDebounceMs = raw.editedDebounceMs;
+    if (typeof raw.editedExcludeDailyNotes === "boolean") data.editedExcludeDailyNotes = raw.editedExcludeDailyNotes;
+    if (Array.isArray(raw.editedIgnoreFolders) || typeof raw.editedIgnoreFolders === "string") {
+      data.editedIgnoreFolders = this.normalizeIgnoreFolders(raw.editedIgnoreFolders);
+    }
+    if (typeof raw.pinsEnabled === "boolean") data.pinsEnabled = raw.pinsEnabled;
+    if (typeof raw.pinsHeading === "string") data.pinsHeading = raw.pinsHeading;
+    if (typeof raw.paginationEnabled === "boolean") data.paginationEnabled = raw.paginationEnabled;
+    if (typeof raw.paginationHeading === "string") data.paginationHeading = raw.paginationHeading;
+    if (typeof raw.sectionHeadingLevel === "number") data.sectionHeadingLevel = raw.sectionHeadingLevel;
+    if (isRecord(raw.rolledOverPairs)) {
+      const pairs: Record<string, number> = {};
+      for (const [pairKey, pairValue] of Object.entries(raw.rolledOverPairs)) {
+        if (typeof pairValue === "number") {
+          pairs[pairKey] = pairValue;
         }
-        data.rolledOverPairs = pairs;
-        continue;
       }
-      (data as Record<string, unknown>)[key] = value;
+      data.rolledOverPairs = pairs;
     }
     return data;
   }
@@ -911,7 +947,7 @@ ${headingLine}
 `;
   }
   mergePinLinkLines(existingLines: string[], incomingLines: string[], dailyFile: TFile): string[] {
-    const merged = [];
+    const merged: string[] = [];
     const seen = new Set<string>();
     for (const line of [...existingLines, ...incomingLines]) {
       if (this.isBlankLine(line) || this.isEmptyWikilinkLine(line)) {
@@ -1028,8 +1064,8 @@ ${headingLine}
     return entries;
   }
   parseDailyNoteDate(file: TFile): moment.Moment | null {
-    const parsed = moment(file.basename, this.settings.dailyNoteFormat, true);
-    return parsed.isValid() ? parsed : null;
+    const parsed: unknown = moment(file.basename, this.settings.dailyNoteFormat, true);
+    return isValidMoment(parsed) ? parsed : null;
   }
   isBlankLine(line: string): boolean {
     return line.trim().length === 0;
@@ -1129,8 +1165,8 @@ ${headingLine}
     };
   }
   extractPendingTasks(scopeLines: string[], sourceDateTag: string): string[] {
-    const result = [];
-    const contexts = [];
+    const result: string[] = [];
+    const contexts: TaskContext[] = [];
     for (const currentLine of scopeLines) {
       const currentIndent = this.getIndentWidth(currentLine);
       while (contexts.length > 0 && currentIndent <= contexts[contexts.length - 1].indent) {
@@ -1220,8 +1256,8 @@ ${headingLine}
     const indent = taskMatch[1];
     const marker = taskMatch[2];
     let body = taskMatch[3];
-    let consec = null;
-    let max = null;
+    let consec: number | null = null;
+    let max: number | null = null;
     const streakMatch = body.match(ROUTINE_STREAK_REGEX);
     if (streakMatch) {
       consec = Number.parseInt(streakMatch[1], 10);
@@ -1278,8 +1314,8 @@ ${headingLine}
         continue;
       }
       const previous = previousById.get(routine.id);
-      let consec;
-      let max;
+      let consec: number;
+      let max: number;
       if (!previous) {
         consec = 0;
         max = 0;
@@ -1302,7 +1338,7 @@ ${headingLine}
   }
   normalizeIgnoreFolders(value: unknown): string[] {
     const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/\r?\n|,/) : DEFAULT_SETTINGS.editedIgnoreFolders;
-    const folders = [];
+    const folders: string[] = [];
     const seen = new Set<string>();
     for (const item of raw) {
       const folder = String(item || "").replace(/\\/g, "/").replace(/\/$/, "").trim();
@@ -1314,7 +1350,7 @@ ${headingLine}
     }
     return folders;
   }
-  getIgnoreFolders() {
+  getIgnoreFolders(): string[] {
     return this.normalizeIgnoreFolders(this.settings.editedIgnoreFolders);
   }
   normalizeVaultPath(path: string): string {
@@ -1328,8 +1364,12 @@ ${headingLine}
     }
     return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
   }
-  getTodayDate() {
-    return moment();
+  getTodayDate(): moment.Moment {
+    const today: unknown = moment();
+    if (!isValidMoment(today)) {
+      throw new Error("Failed to create today's date");
+    }
+    return today;
   }
   getTodayDailyFile() {
     const path = this.getDailyNotePathForDate(this.getTodayDate());
@@ -1361,25 +1401,31 @@ ${headingLine}
     if (value == null || value === "") {
       return null;
     }
-    const raw = Array.isArray(value) ? value[0] : value;
+    let raw: unknown = value;
+    if (Array.isArray(value)) {
+      raw = value.length > 0 ? value[0] : undefined;
+    }
     if (raw instanceof Date) {
-      const parsedDate = moment(raw);
-      return parsedDate.isValid() ? parsedDate : null;
+      const parsedDate: unknown = moment(raw);
+      return isValidMoment(parsedDate) ? parsedDate : null;
     }
     if (typeof raw === "number" && Number.isFinite(raw)) {
-      const parsedNumber = moment(raw);
-      return parsedNumber.isValid() ? parsedNumber : null;
+      const parsedNumber: unknown = moment(raw);
+      return isValidMoment(parsedNumber) ? parsedNumber : null;
     }
-    const text = String(raw).trim();
+    if (typeof raw !== "string") {
+      return null;
+    }
+    const text = raw.trim();
     if (!text) {
       return null;
     }
-    const strict = moment(text, FRONTMATTER_DATE_FORMATS, true);
-    if (strict.isValid()) {
+    const strict: unknown = moment(text, FRONTMATTER_DATE_FORMATS, true);
+    if (isValidMoment(strict)) {
       return strict;
     }
-    const loose = moment(text);
-    return loose.isValid() ? loose : null;
+    const loose: unknown = moment(text);
+    return isValidMoment(loose) ? loose : null;
   }
   isSameCalendarDay(left: moment.Moment, right: moment.Moment): boolean {
     return left.format("YYYY-MM-DD") === right.format("YYYY-MM-DD");
@@ -1400,11 +1446,17 @@ ${headingLine}
     }
     const ctime = file.stat?.ctime;
     const mtime = file.stat?.mtime;
-    if (ctime && this.isSameCalendarDay(moment(ctime), date)) {
-      return true;
+    if (ctime) {
+      const createdAt: unknown = moment(ctime);
+      if (isValidMoment(createdAt) && this.isSameCalendarDay(createdAt, date)) {
+        return true;
+      }
     }
-    if (mtime && this.isSameCalendarDay(moment(mtime), date)) {
-      return true;
+    if (mtime) {
+      const modifiedAt: unknown = moment(mtime);
+      if (isValidMoment(modifiedAt) && this.isSameCalendarDay(modifiedAt, date)) {
+        return true;
+      }
     }
     return false;
   }
@@ -1500,7 +1552,7 @@ ${headingLine}
 `;
   }
   mergeEditedLinkLines(existingLines: string[], incomingLines: string[], dailyFile: TFile): string[] {
-    const merged = [];
+    const merged: string[] = [];
     const seen = new Set<string>();
     for (const line of [...existingLines, ...incomingLines]) {
       if (this.isBlankLine(line) || this.isEmptyWikilinkLine(line)) {
@@ -1680,7 +1732,7 @@ ${headingLine}
       this.pendingEditedDeletes = [];
       this.pendingEditedRenames = [];
     }
-    const incoming = [];
+    const incoming: string[] = [];
     for (const path of Array.from(this.pendingEditedPaths)) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile) || !this.shouldTrackEditedFile(file, dailyFile)) {
@@ -1706,7 +1758,7 @@ ${headingLine}
     }
   }
   collectEditedLinksForDate(dailyFile: TFile, date: moment.Moment): string[] {
-    const links = [];
+    const links: string[] = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!this.shouldTrackEditedFile(file, dailyFile)) {
         continue;
@@ -1785,7 +1837,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
       });
     });
     new Setting(containerEl).setName("Force re-run rollover").setDesc("Clear the saved pair state, then add only tasks that are not already in today's todo (no duplicates). Also refreshes routine streaks, pins, and pagination.").addButton((button) => {
-      button.setButtonText("Force re-run").setDestructive().onClick(async () => {
+      button.setButtonText("Force re-run").setWarning().onClick(async () => {
         button.setDisabled(true);
         try {
           await this.plugin.runRolloverForLatestDailyNote(true);
