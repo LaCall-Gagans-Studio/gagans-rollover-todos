@@ -1,6 +1,6 @@
 {
 	"name": "gagans-rollover-todos",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "Roll over unfinished todos and pinned links, paginate adjacent daily notes, track routine streaks by id, and collect today's edited note links.",
 	"main": "main.js",
 	"type": "module",

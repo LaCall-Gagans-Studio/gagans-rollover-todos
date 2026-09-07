@@ -4,6 +4,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	TAbstractFile,
 	TFile,
 	moment,
 } from "obsidian";
@@ -33,6 +34,33 @@ interface GagansRolloverTodosSettings {
 interface DailyNoteEntry {
 	file: TFile;
 	date: moment.Moment;
+}
+
+interface HeadingScope {
+	lines: string[];
+	headingIndex: number;
+	contentStart: number;
+	contentEnd: number;
+}
+
+interface ParsedRoutine {
+	indent: string;
+	marker: string;
+	id: string;
+	description: string;
+	checked: boolean;
+	consec: number | null;
+	max: number | null;
+}
+
+interface RoutineStats {
+	checked: boolean;
+	consec: number;
+	max: number;
+}
+
+interface StoredPluginData extends Partial<GagansRolloverTodosSettings> {
+	rolledOverPairs?: Record<string, number>;
 }
 
 interface SyncInstance {
@@ -89,11 +117,11 @@ export default class GagansRolloverTodosPlugin extends Plugin {
   async onload() {
     this.autoRolloverQueue = Promise.resolve();
     this.pluginReady = false;
-    this.pendingEditedPaths = /* @__PURE__ */ new Set();
+    this.pendingEditedPaths = new Set<string>();
     this.pendingEditedRenames = [];
     this.pendingEditedDeletes = [];
     this.editedFlushTimer = null;
-    this.writingDailyPaths = /* @__PURE__ */ new Set();
+    this.writingDailyPaths = new Set<string>();
     await this.loadSettings();
     this.addSettingTab(new GagansRolloverTodosSettingTab(this.app, this));
     this.addCommand({
@@ -174,13 +202,34 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.loadSettings();
   }
   async loadSettings() {
-    const data = (await this.loadData()) as (Partial<GagansRolloverTodosSettings> & { rolledOverPairs?: Record<string, number> }) | null;
+    const data = this.parseStoredData(await this.loadData());
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     this.settings.editedIgnoreFolders = this.normalizeIgnoreFolders(
-      data?.editedIgnoreFolders ?? DEFAULT_SETTINGS.editedIgnoreFolders
+      data.editedIgnoreFolders ?? DEFAULT_SETTINGS.editedIgnoreFolders
     );
-    this.rolledOverPairs = data?.rolledOverPairs ?? {};
+    this.rolledOverPairs = data.rolledOverPairs ?? {};
     await this.pruneMissingRolloverPairs();
+  }
+  parseStoredData(raw: unknown): StoredPluginData {
+    if (!raw || typeof raw !== "object") {
+      return {};
+    }
+    const record = raw as Record<string, unknown>;
+    const data: StoredPluginData = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (key === "rolledOverPairs" && value && typeof value === "object" && !Array.isArray(value)) {
+        const pairs: Record<string, number> = {};
+        for (const [pairKey, pairValue] of Object.entries(value as Record<string, unknown>)) {
+          if (typeof pairValue === "number") {
+            pairs[pairKey] = pairValue;
+          }
+        }
+        data.rolledOverPairs = pairs;
+        continue;
+      }
+      (data as Record<string, unknown>)[key] = value;
+    }
+    return data;
   }
   async saveSettings() {
     await this.saveData({ ...this.settings, rolledOverPairs: this.rolledOverPairs });
@@ -204,17 +253,17 @@ export default class GagansRolloverTodosPlugin extends Plugin {
       await this.saveRolloverState();
     }
   }
-  getRolloverKey(sourceFile, targetFile) {
+  getRolloverKey(sourceFile: TFile, targetFile: TFile): string {
     return `${sourceFile.path}|${targetFile.path}`;
   }
-  hasRolledOver(sourceFile, targetFile) {
+  hasRolledOver(sourceFile: TFile, targetFile: TFile): boolean {
     return Boolean(this.rolledOverPairs[this.getRolloverKey(sourceFile, targetFile)]);
   }
-  async markRolledOver(sourceFile, targetFile) {
+  async markRolledOver(sourceFile: TFile, targetFile: TFile): Promise<void> {
     this.rolledOverPairs[this.getRolloverKey(sourceFile, targetFile)] = Date.now();
     await this.saveRolloverState();
   }
-  async clearRolledOver(sourceFile, targetFile) {
+  async clearRolledOver(sourceFile: TFile, targetFile: TFile): Promise<boolean> {
     const key = this.getRolloverKey(sourceFile, targetFile);
     if (!(key in this.rolledOverPairs)) {
       return false;
@@ -223,7 +272,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.saveRolloverState();
     return true;
   }
-  targetHasRolloverFromSource(targetContent, sourceDate) {
+  targetHasRolloverFromSource(targetContent: string, sourceDate: moment.Moment): boolean {
     const sourceDateTag = sourceDate.format(this.settings.tagDateFormat);
     const wikilinkTag = `([[${sourceDateTag}]]-)`;
     const plainTag = `(${sourceDateTag}-)`;
@@ -232,13 +281,15 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     return haystack.includes(wikilinkTag) || haystack.includes(plainTag);
   }
   /** True if todo scope already contains any rollover date tag from another device. */
-  targetHasAnyRolloverTag(targetContent) {
+  targetHasAnyRolloverTag(targetContent: string): boolean {
     const scope = this.extractScopeByHeading(targetContent, this.settings.targetHeading);
     const haystack = scope ? scope.lines.join("\n") : targetContent;
     return /\((?:\d{8}|\[\[[^\]]+\]\])-\)/.test(haystack);
   }
-  sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
   }
   /** Access Obsidian Sync internal plugin when available (undocumented API). */
   getSyncInstance(): SyncInstance | null {
@@ -259,7 +310,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
       return null;
     }
   }
-  getSyncStatusText(sync) {
+  getSyncStatusText(sync: SyncInstance | null): string {
     if (!sync) {
       return "";
     }
@@ -275,7 +326,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     }
     return sync.syncStatus != null ? String(sync.syncStatus) : "";
   }
-  isSyncIdle(sync) {
+  isSyncIdle(sync: SyncInstance | null): boolean {
     if (!sync) {
       return true;
     }
@@ -320,13 +371,13 @@ export default class GagansRolloverTodosPlugin extends Plugin {
       Number(options.settleMs ?? this.settings.syncSettleMs) || DEFAULT_SETTINGS.syncSettleMs
     );
     const deadline = Date.now() + timeoutMs;
-    const waitUntilIdleOnce = () => new Promise((resolve) => {
+    const waitUntilIdleOnce = () => new Promise<boolean>((resolve) => {
       if (this.isSyncIdle(sync)) {
         resolve(true);
         return;
       }
       let settled = false;
-      const finish = (ok) => {
+      const finish = (ok: boolean) => {
         if (settled) {
           return;
         }
@@ -377,12 +428,12 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     }
     return { ready: this.isSyncIdle(sync), reason: this.isSyncIdle(sync) ? "synced" : "timeout" };
   }
-  enqueueAutoRollover(task) {
+  enqueueAutoRollover(task: () => Promise<unknown>): Promise<unknown> {
     const run = this.autoRolloverQueue.then(task, task);
     this.autoRolloverQueue = run.then(() => void 0, () => void 0);
     return run;
   }
-  async isFreshlyCreatedFile(file) {
+  async isFreshlyCreatedFile(file: TFile): Promise<boolean> {
     const stat = await this.app.vault.adapter.stat(file.path);
     if (!stat) {
       return false;
@@ -394,7 +445,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     }
     return age <= ROLLOVER_FRESH_FILE_MS;
   }
-  isInDailyFolder(file) {
+  isInDailyFolder(file: TFile): boolean {
     const folder = (this.settings.dailyNotesFolder || "").replace(/\\/g, "/").replace(/\/$/, "");
     if (!folder) {
       return true;
@@ -402,7 +453,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     const path = file.path.replace(/\\/g, "/");
     return path.startsWith(`${folder}/`);
   }
-  async handleCreatedFile(file) {
+  async handleCreatedFile(file: TAbstractFile): Promise<void> {
     if (!(file instanceof TFile) || file.extension !== "md") {
       return;
     }
@@ -434,7 +485,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
    * After Sync settles, roll into the latest daily only — never from a stale
    * previous note that had not downloaded yet.
    */
-  async processCreatedDailyNote(createdPath) {
+  async processCreatedDailyNote(createdPath: string): Promise<void> {
     const syncResult = await this.waitForSyncReady();
     if (!syncResult.ready && syncResult.reason === "timeout") {
       new Notice(
@@ -487,7 +538,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.backfillEditedLinks(targetEntry.file, targetEntry.date);
   }
   /** Briefly wait for yesterday's note path to appear (no-op if the day was skipped). */
-  async waitForCalendarPreviousDay(targetDate, extraWaitMs = 1e4) {
+  async waitForCalendarPreviousDay(targetDate: moment.Moment, extraWaitMs = 1e4): Promise<boolean> {
     const previous = targetDate.clone().subtract(1, "day");
     const expectedPath = this.getDailyNotePathForDate(previous);
     if (!expectedPath || this.app.vault.getAbstractFileByPath(expectedPath)) {
@@ -512,19 +563,19 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     }
     return Boolean(this.app.vault.getAbstractFileByPath(expectedPath));
   }
-  getDailyNotePathForDate(date) {
+  getDailyNotePathForDate(date: moment.Moment): string {
     const folder = (this.settings.dailyNotesFolder || "").replace(/\\/g, "/").replace(/\/$/, "");
     const name = `${date.format(this.settings.dailyNoteFormat)}.md`;
     return folder ? `${folder}/${name}` : name;
   }
-  findPreviousDailyNote(dailyNotes, targetEntry) {
+  findPreviousDailyNote(dailyNotes: DailyNoteEntry[], targetEntry: DailyNoteEntry): DailyNoteEntry | null {
     const index = dailyNotes.findIndex((entry) => entry.file.path === targetEntry.file.path);
     if (index <= 0) {
       return null;
     }
     return dailyNotes[index - 1];
   }
-  findNextDailyNote(dailyNotes, targetEntry) {
+  findNextDailyNote(dailyNotes: DailyNoteEntry[], targetEntry: DailyNoteEntry): DailyNoteEntry | null {
     const index = dailyNotes.findIndex((entry) => entry.file.path === targetEntry.file.path);
     if (index < 0 || index >= dailyNotes.length - 1) {
       return null;
@@ -574,7 +625,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     const target = dailyNotes[dailyNotes.length - 1];
     await this.runRoutineStreaksFromSourceToTarget(source.file, target.file, isManual);
   }
-  async runRolloverFromSourceToTarget(sourceFile, targetFile, sourceDate, isManual = false, force = false) {
+  async runRolloverFromSourceToTarget(sourceFile: TFile, targetFile: TFile, sourceDate: moment.Moment, isManual = false, force = false): Promise<void> {
     // Always re-read both sides so Sync updates are visible.
     let targetContent = await this.app.vault.read(targetFile);
     if (!force && this.hasRolledOver(sourceFile, targetFile)) {
@@ -682,7 +733,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.markRolledOver(sourceFile, targetFile);
     new Notice(`Rolled over ${newTasks.length} lines from ${sourceFile.basename}.`);
   }
-  async runRoutineStreaksFromSourceToTarget(sourceFile, targetFile, isManual = false) {
+  async runRoutineStreaksFromSourceToTarget(sourceFile: TFile, targetFile: TFile, isManual = false): Promise<void> {
     const sourceContent = await this.app.vault.read(sourceFile);
     let targetContent = await this.app.vault.read(targetFile);
     let targetScope = this.extractScopeByHeading(targetContent, this.settings.routineHeading);
@@ -730,7 +781,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     const target = dailyNotes[dailyNotes.length - 1];
     await this.runPinsRolloverFromSourceToTarget(source.file, target.file, isManual);
   }
-  async runPinsRolloverFromSourceToTarget(sourceFile, targetFile, isManual = false) {
+  async runPinsRolloverFromSourceToTarget(sourceFile: TFile, targetFile: TFile, isManual = false): Promise<void> {
     if (this.settings.pinsEnabled === false) {
       return;
     }
@@ -786,7 +837,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     }
     await this.updatePaginationAround(dailyNotes[dailyNotes.length - 1].file, isManual);
   }
-  async updatePaginationAround(file, isManual = false) {
+  async updatePaginationAround(file: TFile, isManual = false): Promise<void> {
     if (this.settings.paginationEnabled === false) {
       return;
     }
@@ -815,7 +866,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
       }
     }
   }
-  async updatePaginationForFile(file) {
+  async updatePaginationForFile(file: TFile): Promise<boolean> {
     const heading = this.settings.paginationHeading || DEFAULT_SETTINGS.paginationHeading;
     const dailyNotes = this.getSortedDailyNotes();
     const entry = dailyNotes.find((item) => item.file.path === file.path);
@@ -838,7 +889,7 @@ export default class GagansRolloverTodosPlugin extends Plugin {
     await this.modifyDailySafely(file, updated.content);
     return true;
   }
-  ensureLinkHeadingBefore(content, heading, beforeNeedles) {
+  ensureLinkHeadingBefore(content: string, heading: string, beforeNeedles: string[]): string {
     if (this.extractEditedScope(content, heading)) {
       return content;
     }
@@ -859,9 +910,9 @@ export default class GagansRolloverTodosPlugin extends Plugin {
 ${headingLine}
 `;
   }
-  mergePinLinkLines(existingLines, incomingLines, dailyFile) {
+  mergePinLinkLines(existingLines: string[], incomingLines: string[], dailyFile: TFile): string[] {
     const merged = [];
-    const seen = /* @__PURE__ */ new Set();
+    const seen = new Set<string>();
     for (const line of [...existingLines, ...incomingLines]) {
       if (this.isBlankLine(line) || this.isEmptyWikilinkLine(line)) {
         continue;
@@ -878,7 +929,7 @@ ${headingLine}
     }
     return merged;
   }
-  replacePinLinks(content, heading, incomingLines, dailyFile) {
+  replacePinLinks(content: string, heading: string, incomingLines: string[], dailyFile: TFile): { changed: boolean; content: string; addedCount: number } {
     const withHeading = this.ensureLinkHeadingBefore(content, heading, ["todo", "modified", "memo"]);
     const scope = this.extractEditedScope(withHeading, heading);
     if (!scope) {
@@ -905,7 +956,7 @@ ${headingLine}
       addedCount
     };
   }
-  getBodyStartIndex(lines) {
+  getBodyStartIndex(lines: string[]): number {
     if (lines.length === 0 || lines[0].trim() !== "---") {
       return 0;
     }
@@ -916,7 +967,7 @@ ${headingLine}
     }
     return 0;
   }
-  removeHeadingBlock(content, heading) {
+  removeHeadingBlock(content: string, heading: string): string {
     const lines = content.split(/\r?\n/);
     const headingIndex = this.findHeadingIndex(lines, heading);
     if (headingIndex === -1) {
@@ -939,7 +990,7 @@ ${headingLine}
     lines.splice(start, end - start);
     return lines.join("\n");
   }
-  writePaginationBlock(content, heading, previousFile, nextFile, currentFile) {
+  writePaginationBlock(content: string, heading: string, previousFile: TFile | null, nextFile: TFile | null, currentFile: TFile): { changed: boolean; content: string } {
     const upgraded = this.upgradeSectionHeadings(content);
     const without = this.removeHeadingBlock(upgraded.content, heading);
     const lines = without.split(/\r?\n/);
@@ -965,32 +1016,32 @@ ${headingLine}
 `;
     return { changed: nextContent !== content, content: nextContent };
   }
-  getSortedDailyNotes() {
+  getSortedDailyNotes(): DailyNoteEntry[] {
     const entries = this.app.vault.getMarkdownFiles().filter((file) => this.isInDailyFolder(file)).map((file) => {
       const date = this.parseDailyNoteDate(file);
       return date ? { file, date } : null;
-    }).filter((entry) => entry !== null);
+    }).filter((entry): entry is DailyNoteEntry => entry !== null);
     entries.sort((a, b) => {
       const byDate = a.date.valueOf() - b.date.valueOf();
       return byDate !== 0 ? byDate : a.file.path.localeCompare(b.file.path);
     });
     return entries;
   }
-  parseDailyNoteDate(file) {
+  parseDailyNoteDate(file: TFile): moment.Moment | null {
     const parsed = moment(file.basename, this.settings.dailyNoteFormat, true);
     return parsed.isValid() ? parsed : null;
   }
-  isBlankLine(line) {
+  isBlankLine(line: string): boolean {
     return line.trim().length === 0;
   }
-  normalizeHeadingLabel(value) {
+  normalizeHeadingLabel(value: string): string {
     return String(value || "").trim().replace(/^#{1,6}\s+/, "").trim().toLowerCase();
   }
-  isHeadingLine(line, heading) {
+  isHeadingLine(line: string, heading: string): boolean {
     const label = this.normalizeHeadingLabel(heading);
     return Boolean(label) && this.normalizeHeadingLabel(line) === label;
   }
-  findHeadingIndex(lines, heading) {
+  findHeadingIndex(lines: string[], heading: string): number {
     return lines.findIndex((line) => this.isHeadingLine(line, heading));
   }
   getSectionHeadingLevel() {
@@ -1000,7 +1051,7 @@ ${headingLine}
     }
     return Math.min(6, Math.max(1, Math.round(parsed)));
   }
-  formatSectionHeading(heading) {
+  formatSectionHeading(heading: string): string {
     const label = String(heading || "").trim().replace(/^#{1,6}\s+/, "").trim() || "section";
     return `${"#".repeat(this.getSectionHeadingLevel())} ${label}`;
   }
@@ -1014,7 +1065,7 @@ ${headingLine}
       this.settings.paginationHeading || DEFAULT_SETTINGS.paginationHeading
     ];
   }
-  upgradeSectionHeadings(content) {
+  upgradeSectionHeadings(content: string): { changed: boolean; content: string } {
     const lines = content.split(/\r?\n/);
     const labels = this.getKnownSectionLabels();
     let changed = false;
@@ -1033,7 +1084,7 @@ ${headingLine}
     }
     return { changed, content: lines.join("\n") };
   }
-  isPaginationContentLine(line) {
+  isPaginationContentLine(line: string): boolean {
     if (this.isBlankLine(line)) {
       return false;
     }
@@ -1042,11 +1093,11 @@ ${headingLine}
     }
     return this.isEditedLinkLine(line);
   }
-  formatPaginationLine(label, file, currentFile) {
+  formatPaginationLine(label: string, file: TFile | null, currentFile: TFile): string {
     const link = file ? this.formatEditedLink(file, currentFile) : "";
     return link ? `${label} : ${link}` : `${label} :`;
   }
-  isEmptyTaskLine(line) {
+  isEmptyTaskLine(line: string): boolean {
     const taskMatch = line.match(TASK_LINE_REGEX);
     return Boolean(taskMatch) && taskMatch[3].trim().length === 0;
   }
@@ -1056,7 +1107,7 @@ ${headingLine}
    * Scope ends at the first blank line after content begins
    * (so checkboxes after a blank separator are excluded).
    */
-  extractScopeByHeading(content, targetHeading) {
+  extractScopeByHeading(content: string, targetHeading: string): HeadingScope | null {
     const lines = content.split(/\r?\n/);
     const headingIndex = this.findHeadingIndex(lines, targetHeading);
     if (headingIndex === -1) {
@@ -1077,7 +1128,7 @@ ${headingLine}
       contentEnd
     };
   }
-  extractPendingTasks(scopeLines, sourceDateTag) {
+  extractPendingTasks(scopeLines: string[], sourceDateTag: string): string[] {
     const result = [];
     const contexts = [];
     for (const currentLine of scopeLines) {
@@ -1111,7 +1162,7 @@ ${headingLine}
     return result;
   }
   /** Compare tasks ignoring checkbox state and trailing rollover date tags. */
-  normalizeTaskIdentity(line) {
+  normalizeTaskIdentity(line: string): string {
     const taskMatch = line.match(TASK_LINE_REGEX);
     if (!taskMatch) {
       const trimmed = line.trim();
@@ -1124,8 +1175,8 @@ ${headingLine}
     }
     return `task:${indent}:${body}`;
   }
-  filterTasksNotInTarget(candidateTasks, existingLines) {
-    const existing = new Set();
+  filterTasksNotInTarget(candidateTasks: string[], existingLines: string[]): string[] {
+    const existing = new Set<string>();
     for (const line of existingLines) {
       const key = this.normalizeTaskIdentity(line);
       if (key) {
@@ -1137,13 +1188,13 @@ ${headingLine}
       return key && !existing.has(key);
     });
   }
-  appendRolloverDateTagIfNeeded(taskBody, sourceDateTag) {
+  appendRolloverDateTagIfNeeded(taskBody: string, sourceDateTag: string): string {
     if (ROLLOVER_TAG_REGEX.test(taskBody)) {
       return taskBody;
     }
     return `${taskBody} ([[${sourceDateTag}]]-)`;
   }
-  insertTasksAfterHeading(content, targetHeading, tasks) {
+  insertTasksAfterHeading(content: string, targetHeading: string, tasks: string[]): { changed: boolean; content: string } {
     const lines = content.split(/\r?\n/);
     const scope = this.extractScopeByHeading(content, targetHeading);
     if (!scope) {
@@ -1161,7 +1212,7 @@ ${headingLine}
     ];
     return { changed: true, content: newLines.join("\n") };
   }
-  parseRoutineLine(line) {
+  parseRoutineLine(line: string): ParsedRoutine | null {
     const taskMatch = line.match(TASK_LINE_REGEX);
     if (!taskMatch) {
       return null;
@@ -1191,11 +1242,11 @@ ${headingLine}
       max: Number.isFinite(max) ? max : null
     };
   }
-  formatRoutineLine(routine, consec, max) {
+  formatRoutineLine(routine: ParsedRoutine, consec: number, max: number): string {
     return `${routine.indent}- [${routine.marker}] {${routine.id}}${routine.description} ⚡${consec}↑${max}`;
   }
-  collectRoutineStatsById(scopeLines) {
-    const byId = /* @__PURE__ */ new Map();
+  collectRoutineStatsById(scopeLines: string[]): Map<string, RoutineStats> {
+    const byId = new Map<string, RoutineStats>();
     for (const line of scopeLines) {
       const routine = this.parseRoutineLine(line);
       if (!routine) {
@@ -1213,7 +1264,7 @@ ${headingLine}
     }
     return byId;
   }
-  applyRoutineStreaks(content, routineHeading, previousById) {
+  applyRoutineStreaks(content: string, routineHeading: string, previousById: Map<string, RoutineStats>): { changed: boolean; content: string; updatedCount: number } {
     const lines = content.split(/\r?\n/);
     const scope = this.extractScopeByHeading(content, routineHeading);
     if (!scope) {
@@ -1245,14 +1296,14 @@ ${headingLine}
     }
     return { changed, content: lines.join("\n"), updatedCount };
   }
-  getIndentWidth(value) {
+  getIndentWidth(value: string): number {
     const match = value.match(/^[ \t]*/);
     return match ? match[0].length : 0;
   }
-  normalizeIgnoreFolders(value) {
+  normalizeIgnoreFolders(value: unknown): string[] {
     const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/\r?\n|,/) : DEFAULT_SETTINGS.editedIgnoreFolders;
     const folders = [];
-    const seen = /* @__PURE__ */ new Set();
+    const seen = new Set<string>();
     for (const item of raw) {
       const folder = String(item || "").replace(/\\/g, "/").replace(/\/$/, "").trim();
       if (!folder || seen.has(folder)) {
@@ -1266,10 +1317,10 @@ ${headingLine}
   getIgnoreFolders() {
     return this.normalizeIgnoreFolders(this.settings.editedIgnoreFolders);
   }
-  normalizeVaultPath(path) {
+  normalizeVaultPath(path: string): string {
     return String(path || "").replace(/\\/g, "/");
   }
-  isPathInFolder(path, folder) {
+  isPathInFolder(path: string, folder: string): boolean {
     const normalizedPath = this.normalizeVaultPath(path);
     const normalizedFolder = this.normalizeVaultPath(folder).replace(/\/$/, "");
     if (!normalizedFolder) {
@@ -1285,12 +1336,12 @@ ${headingLine}
     const file = this.app.vault.getAbstractFileByPath(path);
     return file instanceof TFile ? file : null;
   }
-  shouldTrackEditedFile(file, dailyFile = null) {
+  shouldTrackEditedFile(file: TAbstractFile, dailyFile: TFile | null = null): boolean {
     if (!(file instanceof TFile) || file.extension !== "md") {
       return false;
     }
     const path = this.normalizeVaultPath(file.path);
-    if (path.startsWith(".obsidian/") || path.includes("/.obsidian/")) {
+    if (path.startsWith(`${this.app.vault.configDir}/`) || path.includes(`/${this.app.vault.configDir}/`)) {
       return false;
     }
     if (dailyFile && path === this.normalizeVaultPath(dailyFile.path)) {
@@ -1306,7 +1357,7 @@ ${headingLine}
     }
     return true;
   }
-  parseFrontmatterDate(value) {
+  parseFrontmatterDate(value: unknown): moment.Moment | null {
     if (value == null || value === "") {
       return null;
     }
@@ -1330,10 +1381,10 @@ ${headingLine}
     const loose = moment(text);
     return loose.isValid() ? loose : null;
   }
-  isSameCalendarDay(left, right) {
+  isSameCalendarDay(left: moment.Moment, right: moment.Moment): boolean {
     return left.format("YYYY-MM-DD") === right.format("YYYY-MM-DD");
   }
-  isFileTouchedOnDate(file, date) {
+  isFileTouchedOnDate(file: TFile, date: moment.Moment): boolean {
     const cache = this.app.metadataCache.getFileCache(file);
     const frontmatter = cache?.frontmatter;
     const created = this.parseFrontmatterDate(frontmatter?.created);
@@ -1357,17 +1408,17 @@ ${headingLine}
     }
     return false;
   }
-  isActivelyBeingEdited(file) {
+  isActivelyBeingEdited(file: TFile): boolean {
     const active = this.app.workspace.getActiveFile();
     return Boolean(active && active.path === file.path);
   }
-  isEmptyWikilinkLine(line) {
+  isEmptyWikilinkLine(line: string): boolean {
     return EMPTY_WIKILINK_REGEX.test(line);
   }
-  isEditedLinkLine(line) {
+  isEditedLinkLine(line: string): boolean {
     return WIKILINK_LINE_REGEX.test(line) || MARKDOWN_LINK_LINE_REGEX.test(line);
   }
-  getEditedLinkpath(line) {
+  getEditedLinkpath(line: string): string {
     const wiki = line.match(WIKILINK_LINE_REGEX);
     if (wiki) {
       return wiki[1].split("|")[0].trim().replace(/\\/g, "/").replace(/\.md$/i, "");
@@ -1382,7 +1433,7 @@ ${headingLine}
     }
     return "";
   }
-  getEditedLinkKey(line, dailyFile) {
+  getEditedLinkKey(line: string, dailyFile: TFile): string {
     const linkpath = this.getEditedLinkpath(line);
     if (!linkpath) {
       return "";
@@ -1393,11 +1444,11 @@ ${headingLine}
     }
     return linkpath.toLowerCase();
   }
-  formatEditedLink(file, dailyFile) {
+  formatEditedLink(file: TFile, dailyFile: TFile): string {
     const link = this.app.fileManager.generateMarkdownLink(file, dailyFile.path);
     return link.startsWith("!") ? link.slice(1) : link;
   }
-  extractEditedScope(content, heading) {
+  extractEditedScope(content: string, heading: string): HeadingScope | null {
     const lines = content.split(/\r?\n/);
     const headingIndex = this.findHeadingIndex(lines, heading);
     if (headingIndex === -1) {
@@ -1426,7 +1477,7 @@ ${headingLine}
       contentEnd: end
     };
   }
-  ensureEditedHeading(content, heading) {
+  ensureEditedHeading(content: string, heading: string): string {
     if (this.extractEditedScope(content, heading)) {
       return content;
     }
@@ -1448,9 +1499,9 @@ ${headingLine}
 ${headingLine}
 `;
   }
-  mergeEditedLinkLines(existingLines, incomingLines, dailyFile) {
+  mergeEditedLinkLines(existingLines: string[], incomingLines: string[], dailyFile: TFile): string[] {
     const merged = [];
-    const seen = /* @__PURE__ */ new Set();
+    const seen = new Set<string>();
     for (const line of [...existingLines, ...incomingLines]) {
       if (this.isBlankLine(line) || this.isEmptyWikilinkLine(line)) {
         continue;
@@ -1472,7 +1523,7 @@ ${headingLine}
     });
     return merged;
   }
-  replaceEditedLinks(content, heading, linkLines, dailyFile) {
+  replaceEditedLinks(content: string, heading: string, linkLines: string[], dailyFile: TFile): { changed: boolean; content: string; addedCount: number } {
     const withHeading = this.ensureEditedHeading(content, heading);
     const scope = this.extractEditedScope(withHeading, heading);
     if (!scope) {
@@ -1496,7 +1547,7 @@ ${headingLine}
       addedCount
     };
   }
-  removeEditedLinkKeys(content, heading, keysToRemove, dailyFile) {
+  removeEditedLinkKeys(content: string, heading: string, keysToRemove: Set<string>, dailyFile: TFile): { changed: boolean; content: string } {
     const scope = this.extractEditedScope(content, heading);
     if (!scope || keysToRemove.size === 0) {
       return { changed: false, content };
@@ -1517,7 +1568,7 @@ ${headingLine}
     const nextContent = nextLines.join("\n");
     return { changed: nextContent !== content, content: nextContent };
   }
-  async modifyDailySafely(file, content) {
+  async modifyDailySafely(file: TFile, content: string): Promise<void> {
     this.writingDailyPaths.add(file.path);
     try {
       await this.app.vault.modify(file, content);
@@ -1539,7 +1590,7 @@ ${headingLine}
       });
     }, delay);
   }
-  async handleEditedNoteEvent(file) {
+  async handleEditedNoteEvent(file: TAbstractFile): Promise<void> {
     if (!this.pluginReady || this.settings.editedEnabled === false) {
       return;
     }
@@ -1565,7 +1616,7 @@ ${headingLine}
     this.pendingEditedPaths.add(current.path);
     this.scheduleEditedFlush();
   }
-  async handleEditedNoteRename(file, oldPath) {
+  async handleEditedNoteRename(file: TAbstractFile, oldPath: string): Promise<void> {
     if (!this.pluginReady || this.settings.editedEnabled === false) {
       return;
     }
@@ -1583,7 +1634,7 @@ ${headingLine}
     }
     this.scheduleEditedFlush();
   }
-  async handleEditedNoteDelete(file) {
+  async handleEditedNoteDelete(file: TAbstractFile): Promise<void> {
     if (!this.pluginReady || this.settings.editedEnabled === false) {
       return;
     }
@@ -1606,7 +1657,7 @@ ${headingLine}
     let content = await this.app.vault.read(dailyFile);
     let changed = false;
     if (this.pendingEditedDeletes.length > 0 || this.pendingEditedRenames.length > 0) {
-      const keysToRemove = /* @__PURE__ */ new Set();
+      const keysToRemove = new Set<string>();
       for (const deletedPath of this.pendingEditedDeletes) {
         keysToRemove.add(this.normalizeVaultPath(deletedPath).toLowerCase());
         const basename = deletedPath.split("/").pop()?.replace(/\.md$/i, "");
@@ -1654,7 +1705,7 @@ ${headingLine}
       await this.modifyDailySafely(dailyFile, content);
     }
   }
-  collectEditedLinksForDate(dailyFile, date) {
+  collectEditedLinksForDate(dailyFile: TFile, date: moment.Moment): string[] {
     const links = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!this.shouldTrackEditedFile(file, dailyFile)) {
@@ -1667,7 +1718,7 @@ ${headingLine}
     }
     return links;
   }
-  async writeEditedLinks(dailyFile, linkLines, isManual = false) {
+  async writeEditedLinks(dailyFile: TFile, linkLines: string[], isManual = false): Promise<void> {
     const heading = this.settings.editedHeading || DEFAULT_SETTINGS.editedHeading;
     const content = await this.app.vault.read(dailyFile);
     const updated = this.replaceEditedLinks(content, heading, linkLines, dailyFile);
@@ -1682,7 +1733,7 @@ ${headingLine}
       new Notice(`Updated edited links (${updated.addedCount} new) in ${dailyFile.basename}.`);
     }
   }
-  async backfillEditedLinks(dailyFile, date, isManual = false) {
+  async backfillEditedLinks(dailyFile: TFile, date: moment.Moment, isManual = false): Promise<void> {
     if (this.settings.editedEnabled === false) {
       return;
     }
@@ -1722,8 +1773,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Rollover Todos (Gagans)" });
-    containerEl.createEl("h3", { text: "Todo管理" });
+    new Setting(containerEl).setName("Todos").setHeading();
     new Setting(containerEl).setName("Run rollover").setDesc("Copy unfinished tasks and pins from the previous daily note into the latest one. Skips if already rolled over (unless the mark is stale). Also refreshes routine streaks and pagination.").addButton((button) => {
       button.setButtonText("Run").setCta().onClick(async () => {
         button.setDisabled(true);
@@ -1735,7 +1785,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
       });
     });
     new Setting(containerEl).setName("Force re-run rollover").setDesc("Clear the saved pair state, then add only tasks that are not already in today's todo (no duplicates). Also refreshes routine streaks, pins, and pagination.").addButton((button) => {
-      button.setButtonText("Force re-run").setWarning().onClick(async () => {
+      button.setButtonText("Force re-run").setDestructive().onClick(async () => {
         button.setDisabled(true);
         try {
           await this.plugin.runRolloverForLatestDailyNote(true);
@@ -1802,7 +1852,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    containerEl.createEl("h3", { text: "ルーティーン管理" });
+    new Setting(containerEl).setName("Routines").setHeading();
     new Setting(containerEl).setName("Update routine streaks").setDesc("Recalculate ⚡consec↑max on the latest daily note from the previous day's check state.").addButton((button) => {
       button.setButtonText("Update streaks").setCta().onClick(async () => {
         button.setDisabled(true);
@@ -1819,7 +1869,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    containerEl.createEl("h3", { text: "その日の編集ノート" });
+    new Setting(containerEl).setName("Edited notes").setHeading();
     new Setting(containerEl).setName("Collect edited notes").setDesc("Automatically add wikilinks under the edited heading when a note is created or modified today. Uses frontmatter created/updated when present, so Sync downloads of old notes are ignored.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.editedEnabled !== false).onChange(async (value) => {
         this.plugin.settings.editedEnabled = value;
@@ -1865,7 +1915,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
         text.inputEl.cols = 40;
       }
     );
-    containerEl.createEl("h3", { text: "ピンの引き継ぎ" });
+    new Setting(containerEl).setName("Pins").setHeading();
     new Setting(containerEl).setName("Roll over pins").setDesc("Copy wikilinks under the pins heading from the previous daily note into the latest one. Existing pins are kept; duplicates are skipped.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.pinsEnabled !== false).onChange(async (value) => {
         this.plugin.settings.pinsEnabled = value;
@@ -1888,7 +1938,7 @@ class GagansRolloverTodosSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    containerEl.createEl("h3", { text: "ページネーション" });
+    new Setting(containerEl).setName("Pagination").setHeading();
     new Setting(containerEl).setName("Link adjacent daily notes").setDesc("Place #### pagination at the top of the daily note (just after frontmatter), with prev : / next : wikilinks to the previous and next existing daily notes (not necessarily yesterday/tomorrow).").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.paginationEnabled !== false).onChange(async (value) => {
         this.plugin.settings.paginationEnabled = value;
